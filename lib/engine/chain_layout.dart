@@ -10,6 +10,7 @@ class LaidTile {
   final bool vertical;
   final bool isDouble;
   final bool isSpinner;
+  final int seq; // PlacedTile.seq — lets the UI track fresh placements
   const LaidTile({
     required this.rect,
     required this.first,
@@ -17,6 +18,7 @@ class LaidTile {
     required this.vertical,
     required this.isDouble,
     this.isSpinner = false,
+    required this.seq,
   });
 }
 
@@ -162,6 +164,7 @@ class ChainLayout {
         vertical: vertical,
         isDouble: p.tile.isDouble,
         isSpinner: spinnerSeqs.contains(p.tile.seq),
+        seq: p.tile.seq,
       ));
     }
 

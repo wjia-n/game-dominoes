@@ -1,47 +1,100 @@
 import 'package:flutter/material.dart';
 import '../engine/chain_layout.dart';
 import '../engine/domino_engine.dart';
+import '../engine/turn_director.dart';
 import '../services/audio_service.dart';
+import '../services/iap_service.dart';
 import '../services/save_store.dart';
 import '../services/settings_store.dart';
+import '../theme/club_themes.dart';
 import '../theme/palette.dart';
 import '../theme/physical.dart';
 import 'game_over_screen.dart';
 import 'settings_screen.dart';
 
-/// Mesa de Juego — the felt table. Serpentine ivory chain with crosswise
-/// spinners, brass name plates, walnut hand rack, boneyard stack.
+/// Mesa de Juego — the felt table, driven by the engine-owned [TurnDirector].
+///
+/// Every seat has its own tray showing the active player with narration;
+/// bot draws and placements fly visibly across the table — never silently
+/// auto-played. The UI renders director events; it never drives turns.
 class BoardScreen extends StatefulWidget {
   final DominoEngine engine;
   final SettingsStore settings;
+  final StoreService store;
   final bool fresh;
-  const BoardScreen(
-      {super.key,
-      required this.engine,
-      required this.settings,
-      this.fresh = true});
+  const BoardScreen({
+    super.key,
+    required this.engine,
+    required this.settings,
+    required this.store,
+    this.fresh = true,
+  });
 
   @override
   State<BoardScreen> createState() => _BoardScreenState();
 }
 
+/// One tile in flight across the table (bot draw / placement).
+class _Flight {
+  final int id;
+  final Offset from;
+  final Offset to;
+  final int first;
+  final int second;
+  final bool faceDown;
+  final int seq; // revealed on landing (-1 for draws)
+  final int player;
+  final bool spinner;
+  final AnimationController controller;
+  _Flight({
+    required this.id,
+    required this.from,
+    required this.to,
+    required this.first,
+    required this.second,
+    required this.faceDown,
+    required this.seq,
+    required this.player,
+    required this.spinner,
+    required this.controller,
+  });
+}
+
 class _BoardScreenState extends State<BoardScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   late DominoEngine _e;
   final SaveStore _save = SaveStore();
+  TurnDirector? _director;
   DomTile? _selected;
-  bool _busy = false;
   bool _paused = false;
   String _banner = '';
 
+  // Visibility machinery.
+  final List<_Flight> _flights = [];
+  int _flightId = 0;
+  final Set<int> _hiddenSeqs = {};
+  final Map<int, int> _pendingDraws = {};
+  final Map<int, String> _trayStatus = {};
+  late List<GlobalKey> _trayKeys;
+  final GlobalKey _boneyardKey = GlobalKey();
+  final GlobalKey _tableKey = GlobalKey();
+  Size _tableSize = Size.zero;
+
+  ClubThemeDef get _theme => widget.settings.theme;
+  TileStyleDef get _tileStyle => widget.settings.tileStyle;
+
   bool get _humanTurn =>
-      !_e.roundOver && !_busy && !_paused && !_e.isBot[_e.turn];
+      !_e.roundOver &&
+      !_paused &&
+      _director?.phase == DirectorPhase.awaitingHuman &&
+      !_e.isBot[_e.turn];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _e = widget.engine;
+    _trayKeys = List.generate(_e.n, (_) => GlobalKey());
     AudioService.instance.playGameMusic();
     if (widget.fresh) {
       AudioService.instance.shuffle();
@@ -50,11 +103,15 @@ class _BoardScreenState extends State<BoardScreen>
       });
     }
     _announceOpening();
-    _maybeBot();
+    _attachDirector();
   }
 
   @override
   void dispose() {
+    _director?.dispose();
+    for (final f in _flights) {
+      f.controller.dispose();
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -66,6 +123,7 @@ class _BoardScreenState extends State<BoardScreen>
       if (!_e.roundOver && !_e.matchOver && mounted && !_paused) {
         setState(() => _paused = true);
       }
+      _detachDirector();
       _saveGame();
       AudioService.instance.pauseMusic();
     } else if (state == AppLifecycleState.resumed) {
@@ -73,82 +131,189 @@ class _BoardScreenState extends State<BoardScreen>
     }
   }
 
-  Future<void> _saveGame() => _save.save(_e);
-
-  void _announceOpening() {
-    final t = _e.spine.first;
-    final opener = _e.names[(_e.turn - 1 + _e.n) % _e.n];
-    _banner =
-        '$opener opens with [${t.connect}|${t.open}]${t.isDouble ? ' — spinner!' : ''}';
+  // ------------------------------------------------------------- director
+  void _attachDirector() {
+    _director?.dispose();
+    _director = TurnDirector(engine: _e, onEvent: _onDirectorEvent)
+      ..start()
+      ..startWatchdog();
   }
 
-  // ------------------------------------------------------------------ bot
-  void _maybeBot() {
-    if (_e.roundOver || _e.matchOver || _busy || _paused) return;
-    if (!_e.isBot[_e.turn]) return;
-    _busy = true;
-    setState(() => _banner = '${_e.names[_e.turn]} is studying the table…');
-    Future.delayed(const Duration(milliseconds: 800), () {
-      if (!mounted || _e.roundOver || _paused || !_e.isBot[_e.turn]) {
-        _busy = false;
-        return;
+  void _detachDirector() {
+    _director?.dispose();
+    _director = null;
+    for (final f in _flights) {
+      f.controller.dispose();
+    }
+    _flights.clear();
+    _hiddenSeqs.clear();
+    _pendingDraws.clear();
+  }
+
+  void _onDirectorEvent(DirectorEvent e) {
+    if (!mounted) return;
+    switch (e) {
+      case HumanTurnEvent(:final player):
+        _selected = null;
+        _trayStatus.clear();
+        _saveGame();
+        setState(() => _banner = _humanPrompt(player));
+      case BotThinkingEvent(:final player):
+        _trayStatus[player] = 'studying the table…';
+        setState(
+            () => _banner = '${_e.names[player]} is studying the table…');
+      case BotDrewEvent(:final player, :final boneyardLeft):
+        _trayStatus[player] = 'drawing…';
+        _pendingDraws[player] = (_pendingDraws[player] ?? 0) + 1;
+        AudioService.instance.draw();
+        _saveGame();
+        setState(() => _banner =
+            '${_e.names[player]} draws from the boneyard… ($boneyardLeft left)');
+        _flyDraw(player);
+      case BotPlayedEvent(
+          :final player,
+          :final tile,
+          :final spinner,
+        ):
+        final seq = _newestSeq();
+        _hiddenSeqs.add(seq);
+        _trayStatus[player] =
+            'laid [${tile.a}|${tile.b}]${spinner ? ' — spinner!' : ''}';
+        _saveGame();
+        setState(() => _banner =
+            '${_e.names[player]} lays [${tile.a}|${tile.b}]${spinner ? ' — spinner!' : ''}');
+        _flyPlay(player, tile, seq, spinner);
+      case BotPassedEvent(:final player):
+        _trayStatus[player] = 'passed';
+        AudioService.instance.click();
+        _saveGame();
+        setState(() => _banner = '${_e.names[player]} passes.');
+      case RoundEndedEvent(:final result):
+        _onRoundEnded(result);
+    }
+  }
+
+  String _humanPrompt(int player) {
+    final humans = _e.isBot.where((b) => !b).length;
+    if (humans <= 1) return 'Your move, ${_e.names[player]}.';
+    return "${_e.names[player]}'s turn — pass the phone.";
+  }
+
+  /// Max PlacedTile.seq on the table — the tile the engine just committed.
+  int _newestSeq() {
+    var m = -1;
+    for (final t in _e.spine) {
+      if (t.seq > m) m = t.seq;
+    }
+    for (final s in _e.spinners) {
+      for (final t in s.armA) {
+        if (t.seq > m) m = t.seq;
       }
-      _botStep();
-    });
-  }
-
-  Future<void> _botStep() async {
-    while (mounted && !_e.roundOver && !_paused && _e.isBot[_e.turn]) {
-      final p = _e.turn;
-      final action = _e.botDecision(p);
-      await Future.delayed(const Duration(milliseconds: 550));
-      if (!mounted || _e.roundOver || _paused) break;
-      switch (action.type) {
-        case BotActionType.draw:
-          final t = _e.drawTile(p, relaxed: action.relaxed);
-          setState(() => _banner =
-              '${_e.names[p]} draws from the boneyard… (${_e.boneyard.length} left)');
-          AudioService.instance.draw();
-          if (t == null) {
-            _botPass(p, action.relaxed);
-            return;
-          }
-          continue; // drawn tile must be played immediately — bot loops
-        case BotActionType.pass:
-          _botPass(p, action.relaxed);
-          return;
-        case BotActionType.play:
-          _busy = false;
-          _botPlay(p, action.tile!, action.end!);
-          return;
+      for (final t in s.armB) {
+        if (t.seq > m) m = t.seq;
       }
     }
-    _busy = false;
-    if (mounted) setState(() {});
+    return m;
   }
 
-  void _botPass(int p, [bool relaxed = false]) {
-    _busy = false;
-    try {
-      _e.pass(p, relaxed: relaxed);
-    } catch (_) {
+  Offset? _keyCenter(GlobalKey key) {
+    final ctx = key.currentContext;
+    if (ctx == null) return null;
+    final box = ctx.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(box.size.center(Offset.zero));
+  }
+
+  void _flyDraw(int player) {
+    final from = _keyCenter(_boneyardKey) ?? _keyCenter(_trayKeys[player]);
+    final to = _keyCenter(_trayKeys[player]);
+    if (from == null || to == null) {
+      _pendingDraws[player] = (_pendingDraws[player] ?? 1) - 1;
       return;
     }
-    setState(() => _banner = '${_e.names[p]} passes.');
-    AudioService.instance.click();
-    _afterMove();
+    final c = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 420));
+    final f = _Flight(
+      id: _flightId++,
+      from: from,
+      to: to,
+      first: 0,
+      second: 0,
+      faceDown: true,
+      seq: -1,
+      player: player,
+      spinner: false,
+      controller: c,
+    );
+    _flights.add(f);
+    c.addStatusListener((s) {
+      if (s == AnimationStatus.completed && mounted) {
+        _pendingDraws[player] = (_pendingDraws[player] ?? 1) - 1;
+        f.controller.dispose();
+        setState(() => _flights.remove(f));
+      }
+    });
+    setState(() {});
+    c.forward();
   }
 
-  void _botPlay(int p, DomTile tile, ChainEnd end) {
-    final madeSpinner = _e.playTile(p, tile, end);
-    if (madeSpinner) {
-      AudioService.instance.spinner();
-    } else {
-      AudioService.instance.clack();
+  void _flyPlay(int player, DomTile tile, int seq, bool spinner) {
+    final from = _keyCenter(_trayKeys[player]);
+    // Target: the rect of the just-placed tile in the current layout.
+    Offset? to;
+    if (_tableSize != Size.zero) {
+      final layout = ChainLayout.build(_e, _tableSize);
+      for (final t in layout.tiles) {
+        if (t.seq == seq) {
+          final box =
+              _tableKey.currentContext?.findRenderObject() as RenderBox?;
+          if (box != null && box.hasSize) {
+            to = box.localToGlobal(t.rect.center);
+          }
+          break;
+        }
+      }
     }
-    setState(() => _banner =
-        '${_e.names[p]} lays [${tile.a}|${tile.b}]${madeSpinner ? ' — spinner!' : ''}');
-    _afterMove();
+    if (from == null || to == null) {
+      // Table not laid out yet — reveal immediately, no flight.
+      _hiddenSeqs.remove(seq);
+      if (spinner) {
+        AudioService.instance.spinner();
+      } else {
+        AudioService.instance.clack();
+      }
+      setState(() {});
+      return;
+    }
+    final c = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 480));
+    final f = _Flight(
+      id: _flightId++,
+      from: from,
+      to: to,
+      first: tile.a,
+      second: tile.b,
+      faceDown: false,
+      seq: seq,
+      player: player,
+      spinner: spinner,
+      controller: c,
+    );
+    _flights.add(f);
+    c.addStatusListener((s) {
+      if (s == AnimationStatus.completed && mounted) {
+        _hiddenSeqs.remove(seq);
+        if (spinner) {
+          AudioService.instance.spinner();
+        } else {
+          AudioService.instance.clack();
+        }
+        f.controller.dispose();
+        setState(() => _flights.remove(f));
+      }
+    });
+    setState(() {});
+    c.forward();
   }
 
   // ------------------------------------------------------------------ human
@@ -158,8 +323,8 @@ class _BoardScreenState extends State<BoardScreen>
     final ends = _e.endsFor(tile);
     if (ends.isEmpty) {
       AudioService.instance.invalid();
-      setState(() => _banner =
-          'That tile matches no open end — try another.');
+      setState(() =>
+          _banner = 'That tile matches no open end — try another.');
       return;
     }
     AudioService.instance.click();
@@ -169,8 +334,9 @@ class _BoardScreenState extends State<BoardScreen>
       setState(() {
         _selected = (_selected == tile) ? null : tile;
         if (_selected != null) {
-          _banner =
-              'Where should [${tile.a}|${tile.b}] go? Tap a brass end.';
+          _banner = 'Where should [${tile.a}|${tile.b}] go? Tap a brass end.';
+        } else {
+          _banner = _humanPrompt(_e.turn);
         }
       });
     }
@@ -203,7 +369,8 @@ class _BoardScreenState extends State<BoardScreen>
     setState(() => _banner = madeSpinner
         ? 'Spinner! Both arms need a tile before the chain continues.'
         : '');
-    _afterMove();
+    _saveGame();
+    _director?.humanPlayed();
   }
 
   void _humanDraw() {
@@ -220,6 +387,7 @@ class _BoardScreenState extends State<BoardScreen>
           : 'Drew [${t.a}|${t.b}] — still stuck, draw again.';
     });
     _saveGame();
+    _director?.humanDrew();
   }
 
   void _humanPass() {
@@ -233,70 +401,66 @@ class _BoardScreenState extends State<BoardScreen>
     }
     AudioService.instance.click();
     setState(() => _banner = '${_e.names[_e.turn]} pass.');
-    _afterMove();
-  }
-
-  void _afterMove() {
-    if (!mounted) return;
-    if (_e.roundOver) {
-      _saveGame();
-      _showRoundEnd();
-      return;
-    }
-    setState(() {
-      if (_banner.isEmpty && !_e.isBot[_e.turn]) {
-        _banner = '${_e.names[_e.turn]}, your move.';
-      }
-    });
     _saveGame();
-    _maybeBot();
+    _director?.humanPassed();
   }
 
   // -------------------------------------------------------------- round end
-  Future<void> _showRoundEnd() async {
-    final res = _e.lastResult;
-    if (res == null || !mounted) return;
-    if (res.domino) {
+  bool _roundSheetOpen = false;
+
+  void _onRoundEnded(RoundResult result) {
+    if (_roundSheetOpen) return;
+    _roundSheetOpen = true;
+    _saveGame(); // clears the save: nothing resumable
+    if (result.domino) {
       AudioService.instance.win();
     } else {
       AudioService.instance.roundStart();
     }
-    final action = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (_) => GameOverScreen(
-          engine: _e,
-          result: res,
-          settings: widget.settings,
-        ),
-      ),
-    );
-    if (!mounted) return;
-    if (action == 'menu') {
-      Navigator.of(context).pop();
-      return;
-    }
-    if (action == 'again') {
-      Navigator.of(context).pop('again');
-      return;
-    }
-    // next round (or the tie-break decider)
-    if (res.tieBreakRound) {
-      _e.beginTieBreak();
-      if (mounted) {
-        setState(() => _banner = 'Decider round — winner takes the match!');
+    Future.microtask(() async {
+      if (!mounted) {
+        _roundSheetOpen = false;
+        return;
       }
-    } else {
-      _e.startRound();
+      final action = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          builder: (_) => GameOverScreen(
+            engine: _e,
+            result: result,
+            settings: widget.settings,
+          ),
+        ),
+      );
+      _roundSheetOpen = false;
+      if (!mounted) return;
+      if (action == 'menu' || (result.matchOver && action != 'again')) {
+        Navigator.of(context).pop();
+        return;
+      }
+      if (action == 'again') {
+        Navigator.of(context).pop('again');
+        return;
+      }
+      // 'next' (or the decider): the director owns the next round.
+      _selected = null;
+      _trayStatus.clear();
+      AudioService.instance.shuffle();
+      AudioService.instance.playGameMusic();
+      _director?.nextRound();
       _announceOpening();
-    }
-    _selected = null;
-    _busy = false;
-    AudioService.instance.shuffle();
-    AudioService.instance.playGameMusic();
-    await _saveGame();
-    if (mounted) setState(() {});
-    _maybeBot();
+      if (mounted) setState(() {});
+    });
   }
+
+  void _announceOpening() {
+    if (_e.spine.isEmpty) return;
+    final t = _e.spine.first;
+    final opener = _e.names[(_e.turn - 1 + _e.n) % _e.n];
+    _banner =
+        '$opener opens with [${t.connect}|${t.open}]${t.isDouble ? ' — spinner!' : ''}';
+  }
+
+  Future<void> _saveGame() => _save.save(_e);
 
   // ------------------------------------------------------------------ pause
   void _togglePause() {
@@ -305,9 +469,10 @@ class _BoardScreenState extends State<BoardScreen>
     if (_paused) {
       setState(() => _paused = false);
       AudioService.instance.resumeMusic();
-      _maybeBot();
+      _attachDirector();
     } else {
       setState(() => _paused = true);
+      _detachDirector();
       _saveGame();
       AudioService.instance.pauseMusic();
     }
@@ -315,16 +480,17 @@ class _BoardScreenState extends State<BoardScreen>
 
   void _restartRound() {
     AudioService.instance.click();
+    _detachDirector();
     _e.startRound();
     _selected = null;
-    _busy = false;
+    _trayStatus.clear();
     _paused = false;
     _announceOpening();
     AudioService.instance.shuffle();
     AudioService.instance.resumeMusic();
     _saveGame();
     setState(() {});
-    _maybeBot();
+    _attachDirector();
   }
 
   void _quitToMenu() {
@@ -339,7 +505,7 @@ class _BoardScreenState extends State<BoardScreen>
         .push(MaterialPageRoute(
             builder: (_) => SettingsScreen(settings: widget.settings)))
         .then((_) {
-      if (_paused) return; // stay paused behind the overlay
+      if (_paused) return;
       if (mounted) setState(() {});
     });
   }
@@ -354,10 +520,9 @@ class _BoardScreenState extends State<BoardScreen>
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('PAUSED',
-                    style: ClubType.plaqueTitle(24)),
+                Text('PAUSED', style: ClubType.plaqueTitle(24)),
                 const SizedBox(height: 6),
-                Text('The tiles wait. The coffee doesn\'t.',
+                Text("The tiles wait. The coffee doesn't.",
                     style: ClubType.bodyText(14,
                         color: ClubPalette.parchment, italic: true)),
                 const SizedBox(height: 18),
@@ -374,9 +539,7 @@ class _BoardScreenState extends State<BoardScreen>
                         onTap: _openSettings),
                     const SizedBox(width: 10),
                     BrassButton(
-                        label: 'Quit',
-                        compact: true,
-                        onTap: _quitToMenu),
+                        label: 'Quit', compact: true, onTap: _quitToMenu),
                   ],
                 ),
               ],
@@ -390,37 +553,64 @@ class _BoardScreenState extends State<BoardScreen>
   // ------------------------------------------------------------------- ui
   @override
   Widget build(BuildContext context) {
-    final turn = _e.turn;
-    final stuck = _humanTurn && !_e.hasPlay(turn);
-    final showDraw = _humanTurn &&
-        stuck &&
-        _e.mode == GameMode.draw &&
-        _e.boneyard.isNotEmpty;
-    final showPass =
-        _humanTurn && stuck && _e.boneyard.isEmpty;
-
-    return Scaffold(
-      backgroundColor: ClubPalette.darkSurface,
-      body: FeltTable(
-        borderRadius: BorderRadius.circular(12),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              Column(
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: ClubPalette.darkSurface,
+          body: FeltTable(
+            borderRadius: BorderRadius.circular(12),
+            theme: _theme,
+            child: SafeArea(
+              child: Stack(
                 children: [
-                  _topBar(),
-                  _playerPlates(),
-                  _bannerStrip(),
-                  Expanded(child: _table()),
-                  _controls(showDraw: showDraw, showPass: showPass),
-                  _handRack(),
+                  Column(
+                    children: [
+                      _topBar(),
+                      _traysStrip(),
+                      _bannerStrip(),
+                      Expanded(child: _table()),
+                      _controls(),
+                      _handRack(),
+                    ],
+                  ),
+                  if (_paused) _pauseOverlay(),
                 ],
               ),
-              if (_paused) _pauseOverlay(),
-            ],
+            ),
           ),
         ),
-      ),
+        for (final f in _flights) _flightWidget(f),
+      ],
+    );
+  }
+
+  Widget _flightWidget(_Flight f) {
+    return AnimatedBuilder(
+      animation: f.controller,
+      builder: (_, _) {
+        final t = Curves.easeInOut.transform(f.controller.value);
+        final pos = Offset.lerp(f.from, f.to, t)!;
+        const w = 34.0;
+        return Positioned(
+          left: pos.dx - w / 2,
+          top: pos.dy - w,
+          child: Transform.rotate(
+            angle: (1 - t) * 0.5,
+            child: Opacity(
+              opacity: 0.35 + 0.65 * t,
+              child: DominoTile(
+                first: f.first,
+                second: f.second,
+                vertical: true,
+                faceDown: f.faceDown,
+                width: w,
+                elevation: 1.6,
+                style: _tileStyle,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -436,8 +626,7 @@ class _BoardScreenState extends State<BoardScreen>
               decoration: BoxDecoration(
                 gradient: ClubPalette.brassFace,
                 borderRadius: BorderRadius.circular(8),
-                border:
-                    Border.all(color: ClubPalette.brassDark, width: 1.4),
+                border: Border.all(color: ClubPalette.brassDark, width: 1.4),
                 boxShadow: [
                   BoxShadow(
                       color: Colors.black.withValues(alpha: 0.5),
@@ -458,7 +647,7 @@ class _BoardScreenState extends State<BoardScreen>
             padding:
                 const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: ClubPalette.feltDeep,
+              color: _theme.feltDeep,
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                   color: ClubPalette.brassDark.withValues(alpha: 0.7)),
@@ -473,9 +662,12 @@ class _BoardScreenState extends State<BoardScreen>
     );
   }
 
-  Widget _playerPlates() {
+  /// Every seat's own tray: name, type, hidden-tile fan, score, and the
+  /// active seat highlighted with live narration.
+  Widget _traysStrip() {
+    final accent = widget.settings.tableAccent;
     return SizedBox(
-      height: 44,
+      height: 78,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -484,59 +676,111 @@ class _BoardScreenState extends State<BoardScreen>
         itemBuilder: (_, i) {
           final active = i == _e.turn && !_e.roundOver;
           final bot = _e.isBot[i];
+          final count =
+              _e.hands[i].length - (_pendingDraws[i] ?? 0);
+          final status = _trayStatus[i];
           return AnimatedContainer(
+            key: _trayKeys[i],
             duration: const Duration(milliseconds: 200),
+            width: 128,
             padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
-              gradient: active
-                  ? ClubPalette.brassFace
-                  : const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0xFF3A2A18), Color(0xFF241610)],
-                    ),
-              borderRadius: BorderRadius.circular(8),
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  _theme.walnutLight,
+                  _theme.walnut,
+                ],
+              ),
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                  color: active
-                      ? ClubPalette.brassBright
-                      : ClubPalette.brassDark.withValues(alpha: 0.6),
-                  width: active ? 2 : 1.2),
+                  color: active ? accent.color : accent.deep,
+                  width: active ? 2.4 : 1.2),
               boxShadow: active
                   ? [
                       BoxShadow(
-                          color: ClubPalette.brass
-                              .withValues(alpha: 0.35),
-                          blurRadius: 8,
+                          color: accent.color.withValues(alpha: 0.45),
+                          blurRadius: 10,
                           offset: const Offset(0, 2)),
                     ]
-                  : null,
+                  : [
+                      BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.4),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2)),
+                    ],
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  '${bot ? '🤖 ' : ''}${_e.names[i]}',
-                  style: active
-                      ? ClubType.engraved(12)
-                      : ClubType.label(12,
-                          color: ClubPalette.parchment),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _e.names[i].toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ClubType.label(
+                            10.5,
+                            color: active
+                                ? accent.color
+                                : ClubPalette.brassPale),
+                      ),
+                    ),
+                    Text(bot ? '🤖' : '🧑',
+                        style: const TextStyle(fontSize: 11)),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 7, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.35),
-                    borderRadius: BorderRadius.circular(10),
+                const SizedBox(height: 2),
+                // hidden-tile fan
+                SizedBox(
+                  height: 20,
+                  child: Row(
+                    children: [
+                      for (int k = 0;
+                          k < count.clamp(0, 7);
+                          k++)
+                        Container(
+                          width: 9,
+                          height: 18,
+                          margin: const EdgeInsets.only(right: 2),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(2),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                _theme.walnutLight,
+                                _theme.walnutDeep,
+                              ],
+                            ),
+                            border: Border.all(
+                                color: accent.deep, width: 0.8),
+                          ),
+                        ),
+                      const SizedBox(width: 2),
+                      Text('$count',
+                          style: ClubType.number(10,
+                              color: ClubPalette.brassBright)),
+                    ],
                   ),
-                  child: Text(
-                    '${_e.hands[i].length} tiles · ${_e.scores[i]} pts',
-                    style: ClubType.number(11,
-                        color: active
-                            ? ClubPalette.deboss
-                            : ClubPalette.brassBright),
-                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  active && status != null
+                      ? status
+                      : '${_e.scores[i]} pts',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: ClubType.bodyText(
+                      10.5,
+                      color: active
+                          ? ClubPalette.brassBright
+                          : ClubPalette.parchment,
+                      italic: active),
                 ),
               ],
             ),
@@ -591,33 +835,34 @@ class _BoardScreenState extends State<BoardScreen>
       child: ClipRRect(
         borderRadius: BorderRadius.circular(9),
         child: LayoutBuilder(
+          key: _tableKey,
           builder: (context, constraints) {
             final size =
                 Size(constraints.maxWidth, constraints.maxHeight);
+            _tableSize = size;
             final layout = ChainLayout.build(_e, size);
             return CustomPaint(
-              painter: const FeltPainter(seed: 21),
+              painter: FeltPainter(seed: 21, theme: _theme),
               child: Stack(
                 children: [
                   for (final t in layout.tiles)
-                    Positioned(
-                      left: t.rect.left,
-                      top: t.rect.top,
-                      width: t.rect.width,
-                      height: t.rect.height,
-                      child: DominoTile(
-                        first: t.first,
-                        second: t.second,
-                        vertical: t.vertical,
-                        // horizontal rect is 2×tileW wide: width drives height
+                    if (!_hiddenSeqs.contains(t.seq))
+                      Positioned(
+                        left: t.rect.left,
+                        top: t.rect.top,
                         width: t.rect.width,
+                        height: t.rect.height,
+                        child: DominoTile(
+                          first: t.first,
+                          second: t.second,
+                          vertical: t.vertical,
+                          width: t.rect.width,
+                          style: _tileStyle,
+                        ),
                       ),
-                    ),
                   if (_selected != null && _humanTurn)
                     for (final m in layout.ends)
-                      if (_e
-                          .endsFor(_selected!)
-                          .contains(m.end))
+                      if (_e.endsFor(_selected!).contains(m.end))
                         Positioned(
                           left: m.center.dx - 17,
                           top: m.center.dy - 17,
@@ -631,6 +876,7 @@ class _BoardScreenState extends State<BoardScreen>
                       right: 8,
                       top: 8,
                       child: _Boneyard(
+                        key: _boneyardKey,
                         count: _e.boneyard.length,
                         onTap: _humanDraw,
                       ),
@@ -644,7 +890,14 @@ class _BoardScreenState extends State<BoardScreen>
     );
   }
 
-  Widget _controls({required bool showDraw, required bool showPass}) {
+  Widget _controls() {
+    final turn = _e.turn;
+    final stuck = _humanTurn && !_e.hasPlay(turn);
+    final showDraw = _humanTurn &&
+        stuck &&
+        _e.mode == GameMode.draw &&
+        _e.boneyard.isNotEmpty;
+    final showPass = _humanTurn && stuck && _e.boneyard.isEmpty;
     return SizedBox(
       height: 56,
       child: Center(
@@ -654,13 +907,12 @@ class _BoardScreenState extends State<BoardScreen>
                 compact: true,
                 onTap: _humanDraw)
             : showPass
-                ? OxbloodButton(
-                    label: 'Pass', onTap: _humanPass)
+                ? OxbloodButton(label: 'Pass', onTap: _humanPass)
                 : Text(
                     _e.roundOver
                         ? ''
                         : _e.isBot[_e.turn]
-                            ? '${_e.names[_e.turn]} is playing…'
+                            ? '${_e.names[_e.turn]} is playing — watch the table…'
                             : _selected != null
                                 ? 'Tap a glowing brass end'
                                 : 'Tap one of your tiles to play',
@@ -671,13 +923,21 @@ class _BoardScreenState extends State<BoardScreen>
     );
   }
 
+  /// The current seat's rack: the human's real tiles face-up and playable;
+  /// a bot's tiles stay hidden (watch their tray instead).
   Widget _handRack() {
-    final hand = _e.hands[_e.turn];
+    final turn = _e.turn;
+    final human = !_e.isBot[turn];
+    final hand = _e.hands[turn];
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
       decoration: BoxDecoration(
-        gradient: ClubPalette.walnutFace,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [_theme.walnutLight, _theme.walnutDeep],
+        ),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: ClubPalette.brassDark, width: 1.6),
         boxShadow: [
@@ -696,12 +956,14 @@ class _BoardScreenState extends State<BoardScreen>
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '${_e.names[_e.turn]}\'s hand · ${hand.length} tiles',
+                  human
+                      ? '${_e.names[turn]}\'s hand · ${hand.length} tiles'
+                      : '${_e.names[turn]}\'s tiles stay hidden — watch their tray',
                   style: ClubType.label(12,
                       color: ClubPalette.brassPale),
                 ),
               ),
-              Text('${_e.scores[_e.turn]} pts',
+              Text('${_e.scores[turn]} pts',
                   style: ClubType.number(12,
                       color: ClubPalette.brassBright)),
               const SizedBox(width: 8),
@@ -711,56 +973,83 @@ class _BoardScreenState extends State<BoardScreen>
           const SizedBox(height: 6),
           SizedBox(
             height: 108,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: hand.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 8),
-              itemBuilder: (_, i) {
-                final tile = hand[i];
-                final playable =
-                    _humanTurn && _e.endsFor(tile).isNotEmpty;
-                final selected = _selected == tile;
-                return GestureDetector(
-                  onTap: () => _onTileTap(tile),
-                  child: AnimatedContainer(
-                    duration:
-                        const Duration(milliseconds: 160),
-                    transform: Matrix4.translationValues(
-                        0, playable ? (selected ? -12 : -6) : 6, 0),
-                    padding: selected
-                        ? const EdgeInsets.all(2.5)
-                        : EdgeInsets.zero,
-                    decoration: selected
-                        ? BoxDecoration(
-                            borderRadius:
-                                BorderRadius.circular(10),
-                            border: Border.all(
-                                color:
-                                    ClubPalette.brassBright,
-                                width: 2.5),
-                            boxShadow: [
-                              BoxShadow(
-                                  color: ClubPalette.brass
-                                      .withValues(alpha: 0.5),
-                                  blurRadius: 10,
-                                  offset: const Offset(0, 3)),
-                            ],
-                          )
-                        : null,
-                    child: Opacity(
-                      opacity: _humanTurn && !playable ? 0.45 : 1.0,
-                      child: DominoTile(
-                        first: tile.a,
-                        second: tile.b,
-                        vertical: true,
-                        width: 46,
-                        elevation: playable ? 1.4 : 0.8,
-                      ),
-                    ),
+            child: human
+                ? ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: hand.length,
+                    separatorBuilder: (_, _) =>
+                        const SizedBox(width: 8),
+                    itemBuilder: (_, i) {
+                      final tile = hand[i];
+                      final playable =
+                          _humanTurn && _e.endsFor(tile).isNotEmpty;
+                      final selected = _selected == tile;
+                      return GestureDetector(
+                        onTap: () => _onTileTap(tile),
+                        child: AnimatedContainer(
+                          duration:
+                              const Duration(milliseconds: 160),
+                          transform: Matrix4.translationValues(
+                              0,
+                              playable
+                                  ? (selected ? -12 : -6)
+                                  : 6,
+                              0),
+                          padding: selected
+                              ? const EdgeInsets.all(2.5)
+                              : EdgeInsets.zero,
+                          decoration: selected
+                              ? BoxDecoration(
+                                  borderRadius:
+                                      BorderRadius.circular(10),
+                                  border: Border.all(
+                                      color: ClubPalette.brassBright,
+                                      width: 2.5),
+                                  boxShadow: [
+                                    BoxShadow(
+                                        color: ClubPalette.brass
+                                            .withValues(alpha: 0.5),
+                                        blurRadius: 10,
+                                        offset: const Offset(0, 3)),
+                                  ],
+                                )
+                              : null,
+                          child: Opacity(
+                            opacity:
+                                _humanTurn && !playable ? 0.45 : 1.0,
+                            child: DominoTile(
+                              first: tile.a,
+                              second: tile.b,
+                              vertical: true,
+                              width: 46,
+                              elevation: playable ? 1.4 : 0.8,
+                              style: _tileStyle,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      for (int k = 0;
+                          k < hand.length.clamp(0, 10);
+                          k++)
+                        Container(
+                          width: 26,
+                          height: 52,
+                          margin:
+                              const EdgeInsets.symmetric(horizontal: 3),
+                          child: DominoTile(
+                              first: 0,
+                              second: 0,
+                              faceDown: true,
+                              width: 26,
+                              style: _tileStyle),
+                        ),
+                    ],
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
@@ -804,8 +1093,7 @@ class _EndMarker extends StatelessWidget {
           ],
         ),
         child: Center(
-          child: Text('$value',
-              style: ClubType.engraved(16)),
+          child: Text('$value', style: ClubType.engraved(16)),
         ),
       ),
     );
@@ -816,7 +1104,7 @@ class _EndMarker extends StatelessWidget {
 class _Boneyard extends StatelessWidget {
   final int count;
   final VoidCallback onTap;
-  const _Boneyard({required this.count, required this.onTap});
+  const _Boneyard({super.key, required this.count, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -848,8 +1136,7 @@ class _Boneyard extends StatelessWidget {
                       offset: const Offset(0, 2)),
                 ],
               ),
-              child: Text('$count',
-                  style: ClubType.engraved(12)),
+              child: Text('$count', style: ClubType.engraved(12)),
             ),
           ),
         ],

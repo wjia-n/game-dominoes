@@ -205,7 +205,9 @@ class DominoEngine {
       for (int a = 0; a <= 6; a++)
         for (int b = a; b <= 6; b++) DomTile(a, b),
     ]..shuffle(_rand);
-    final per = n == 2 ? 7 : 5;
+    // RULES §10: the final tie-break round plays Draw-mode rules with
+    // "2 players' worth of tiles" — 7 each, like a 2-player deal.
+    final per = (n == 2 || tieBreak) ? 7 : 5;
     hands = List.generate(n, (_) => <DomTile>[]);
     for (int i = 0; i < per * n; i++) {
       hands[i % n].add(tiles.removeLast());

@@ -1,18 +1,20 @@
 import 'package:flutter/material.dart';
 import '../engine/domino_engine.dart';
 import '../services/audio_service.dart';
+import '../services/iap_service.dart';
 import '../services/save_store.dart';
 import '../services/settings_store.dart';
 import '../theme/palette.dart';
 import '../theme/physical.dart';
 import 'board_screen.dart';
+import 'pro_screen.dart';
 import 'settings_screen.dart';
-
-const List<String> botNames = ['Alejandro', 'Emilia', 'Rafael', 'Carmen'];
+import 'theme_screen.dart';
 
 class MenuScreen extends StatefulWidget {
   final SettingsStore settings;
-  const MenuScreen({super.key, required this.settings});
+  final StoreService store;
+  const MenuScreen({super.key, required this.settings, required this.store});
 
   @override
   State<MenuScreen> createState() => _MenuScreenState();
@@ -21,15 +23,23 @@ class MenuScreen extends StatefulWidget {
 class _MenuScreenState extends State<MenuScreen> {
   GameMode _mode = GameMode.draw;
   int _seats = 2;
-  bool _vsBot = true;
+  late List<bool> _seatIsBot;
   bool _hasSave = false;
   Map<String, dynamic>? _saveMeta;
 
   @override
   void initState() {
     super.initState();
+    _seatIsBot = [false, true, true, true];
     AudioService.instance.playMenuMusic();
     _checkSave();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Refresh theme/pro state when returning from other screens.
+    setState(() {});
   }
 
   Future<void> _checkSave() async {
@@ -44,16 +54,9 @@ class _MenuScreenState extends State<MenuScreen> {
     }
   }
 
-  List<String> _names() {
-    final names = <String>['You'];
-    for (int i = 1; i < _seats; i++) {
-      names.add(_vsBot ? botNames[(i - 1) % botNames.length] : 'Player ${i + 1}');
-    }
-    return names;
-  }
-
-  List<bool> _bots() =>
-      List.generate(_seats, (i) => i == 0 ? false : _vsBot);
+  List<String> _names() => List.generate(
+      _seats, (i) => widget.settings.playerNames[i]);
+  List<bool> _bots() => List.generate(_seats, (i) => _seatIsBot[i]);
 
   void _start({DominoEngine? restored}) {
     AudioService.instance.click();
@@ -69,7 +72,11 @@ class _MenuScreenState extends State<MenuScreen> {
         .push(
       MaterialPageRoute(
         builder: (_) => BoardScreen(
-            engine: engine, settings: widget.settings, fresh: restored == null),
+          engine: engine,
+          settings: widget.settings,
+          store: widget.store,
+          fresh: restored == null,
+        ),
       ),
     )
         .then((_) {
@@ -93,6 +100,90 @@ class _MenuScreenState extends State<MenuScreen> {
         .push(MaterialPageRoute(
             builder: (_) => SettingsScreen(settings: widget.settings)))
         .then((_) => setState(() {}));
+  }
+
+  void _openThemes() {
+    AudioService.instance.click();
+    Navigator.of(context)
+        .push(MaterialPageRoute(
+            builder: (_) => ThemeScreen(
+                settings: widget.settings, store: widget.store)))
+        .then((_) => setState(() {}));
+  }
+
+  void _openPro() {
+    AudioService.instance.click();
+    Navigator.of(context)
+        .push(MaterialPageRoute(
+            builder: (_) => ProScreen(
+                settings: widget.settings, store: widget.store)))
+        .then((_) => setState(() {}));
+  }
+
+  void _renameSeat(int seat) {
+    final ctrl =
+        TextEditingController(text: widget.settings.playerNames[seat]);
+    AudioService.instance.click();
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: ClubPanel(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('NAME SEAT ${seat + 1}',
+                  textAlign: TextAlign.center,
+                  style: ClubType.plaqueTitle(18)),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                maxLength: 14,
+                style: ClubType.bodyText(17),
+                decoration: InputDecoration(
+                  counterText: '',
+                  filled: true,
+                  fillColor: ClubPalette.feltDeep,
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(
+                        color: ClubPalette.brassDark, width: 1.4),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(
+                        color: ClubPalette.brassBright, width: 1.8),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OxbloodButton(
+                      label: 'Cancel',
+                      onTap: () => Navigator.pop(ctx),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: BrassButton(
+                      label: 'Save',
+                      onTap: () {
+                        widget.settings.setPlayerName(seat, ctrl.text);
+                        Navigator.pop(ctx);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _howToPlay() {
@@ -144,17 +235,42 @@ class _MenuScreenState extends State<MenuScreen> {
       backgroundColor: ClubPalette.darkSurface,
       body: FeltTable(
         borderRadius: BorderRadius.circular(12),
+        theme: widget.settings.theme,
         child: SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const SizedBox(height: 6),
+                // Game logo.
+                Center(
+                  child: Container(
+                    width: 110,
+                    height: 110,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                          color: ClubPalette.brassBright, width: 2.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.6),
+                          offset: const Offset(0, 8),
+                          blurRadius: 18,
+                        ),
+                      ],
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Image.asset('assets/domino_logo.png',
+                        fit: BoxFit.cover),
+                  ),
+                ),
+                const SizedBox(height: 8),
                 Text('CLUB DE DOMINÓ HABANA',
                     textAlign: TextAlign.center,
                     style: ClubType.label(12, color: ClubPalette.brass)),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 Text('DOMINOES',
                     textAlign: TextAlign.center,
                     style: ClubType.headline(46).copyWith(
@@ -174,7 +290,6 @@ class _MenuScreenState extends State<MenuScreen> {
                     style: ClubType.bodyText(14,
                         color: ClubPalette.parchment, italic: true)),
                 const SizedBox(height: 14),
-                // loose ivory tiles on the felt
                 const _LooseTiles(),
                 const SizedBox(height: 18),
                 Text('MODALIDAD DE MESA',
@@ -226,37 +341,35 @@ class _MenuScreenState extends State<MenuScreen> {
                       .toList(),
                 ),
                 const SizedBox(height: 12),
+                // Seat setup: every seat is human or bot, with a renameable name.
                 ClubPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
-                  child: Row(
+                      horizontal: 12, vertical: 8),
+                  child: Column(
                     children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('PLAY VS BOT',
-                                style: ClubType.label(13,
-                                    color: ClubPalette.brassPale)),
-                            Text(
-                                _vsBot
-                                    ? 'The house deals you worthy rivals'
-                                    : 'Pass-and-play with friends',
-                                style: ClubType.bodyText(13,
-                                    color: ClubPalette.parchment)),
-                          ],
-                        ),
-                      ),
-                      BrassToggle(
-                          value: _vsBot,
-                          onChanged: (v) {
+                      for (int i = 0; i < _seats; i++)
+                        _SeatRow(
+                          seat: i,
+                          name: widget.settings.playerNames[i],
+                          isBot: _seatIsBot[i],
+                          onToggleBot: (v) {
                             AudioService.instance.click();
-                            setState(() => _vsBot = v);
-                          }),
+                            setState(() => _seatIsBot[i] = v);
+                          },
+                          onRename: () => _renameSeat(i),
+                        ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 6),
+                Text(
+                  'Seat 1 is always human. Flip seats to mix bots and '
+                  'pass-and-play rivals.',
+                  textAlign: TextAlign.center,
+                  style: ClubType.bodyText(12,
+                      color: ClubPalette.parchment, italic: true),
+                ),
+                const SizedBox(height: 14),
                 if (_hasSave) ...[
                   OxbloodButton(
                       label:
@@ -270,15 +383,44 @@ class _MenuScreenState extends State<MenuScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     _MiniLink(label: 'Settings', onTap: _openSettings),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10),
+                      child: BrassRivet(size: 8),
+                    ),
+                    _MiniLink(label: 'Table & tiles', onTap: _openThemes),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10),
                       child: BrassRivet(size: 8),
                     ),
                     _MiniLink(label: 'How to play', onTap: _howToPlay),
                   ],
                 ),
                 const SizedBox(height: 10),
-                Text('Difficulty: ${_diffName(widget.settings.difficulty)} · '
+                Center(
+                  child: GestureDetector(
+                    onTap: _openPro,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                            color: ClubPalette.brassBright, width: 1.4),
+                        color: ClubPalette.brass.withValues(alpha: 0.15),
+                      ),
+                      child: Text(
+                        widget.settings.pro
+                            ? '✦ PRO MEMBER ✦'
+                            : '✦ GO PRO — 12 tables, 10 tiles, Hard bot ✦',
+                        style: ClubType.label(12,
+                            color: ClubPalette.brassBright),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                    'Difficulty: ${_diffName(widget.settings.difficulty)} · '
                     'Target: ${widget.settings.matchTarget} pts',
                     textAlign: TextAlign.center,
                     style: ClubType.label(11, color: ClubPalette.parchment)),
@@ -296,6 +438,83 @@ class _MenuScreenState extends State<MenuScreen> {
         BotDifficulty.normal => 'Normal',
         BotDifficulty.hard => 'Hard',
       };
+}
+
+/// One seat: name (tap ✎ to rename), human/bot flip.
+class _SeatRow extends StatelessWidget {
+  final int seat;
+  final String name;
+  final bool isBot;
+  final ValueChanged<bool> onToggleBot;
+  final VoidCallback onRename;
+  const _SeatRow({
+    required this.seat,
+    required this.name,
+    required this.isBot,
+    required this.onToggleBot,
+    required this.onRename,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final locked = seat == 0; // seat 1 is always human
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                  color: ClubPalette.brassDark, width: 1.4),
+              color: ClubPalette.feltDeep,
+            ),
+            child: Center(
+              child: Text('${seat + 1}',
+                  style: ClubType.number(13,
+                      color: ClubPalette.brassBright)),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: GestureDetector(
+              onTap: onRename,
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: ClubType.bodyText(16),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.edit,
+                      size: 14, color: ClubPalette.brass),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(isBot ? 'BOT' : 'HUMAN',
+              style: ClubType.label(11,
+                  color: isBot
+                      ? ClubPalette.parchment
+                      : ClubPalette.brassBright)),
+          const SizedBox(width: 8),
+          if (locked)
+            Text('fixed',
+                style: ClubType.bodyText(11,
+                    color: ClubPalette.parchment, italic: true))
+          else
+            BrassToggle(value: isBot, onChanged: onToggleBot),
+        ],
+      ),
+    );
+  }
 }
 
 class _LooseTiles extends StatelessWidget {
@@ -361,7 +580,9 @@ class _ModePlaque extends StatelessWidget {
                 ),
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-              color: selected ? ClubPalette.brassDark : const Color(0xFF5C5140),
+              color: selected
+                  ? ClubPalette.brassDark
+                  : const Color(0xFF5C5140),
               width: 1.6),
           boxShadow: [
             BoxShadow(
@@ -395,7 +616,8 @@ class _SeatChip extends StatelessWidget {
   final int n;
   final bool selected;
   final VoidCallback onTap;
-  const _SeatChip({required this.n, required this.selected, required this.onTap});
+  const _SeatChip(
+      {required this.n, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {

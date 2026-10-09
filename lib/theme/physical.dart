@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'club_themes.dart';
 import 'palette.dart';
 
 // ---------------------------------------------------------------------------
@@ -8,12 +9,14 @@ import 'palette.dart';
 // ---------------------------------------------------------------------------
 class FeltPainter extends CustomPainter {
   final int seed;
-  const FeltPainter({this.seed = 7});
+  final ClubThemeDef? theme;
+  const FeltPainter({this.seed = 7, this.theme});
 
   @override
   void paint(Canvas canvas, Size size) {
+    final t = theme;
     final rect = Offset.zero & size;
-    canvas.drawRect(rect, Paint()..color = ClubPalette.felt);
+    canvas.drawRect(rect, Paint()..color = t?.felt ?? ClubPalette.felt);
 
     // cloth grain
     final rng = Random(seed);
@@ -50,33 +53,39 @@ class FeltPainter extends CustomPainter {
         ).createShader(rect),
     );
     // perimeter vignette
+    final vig = t?.feltVignette ?? const Color(0xFF101F18);
     canvas.drawRect(
       rect,
       Paint()
-        ..shader = const RadialGradient(
-          center: Alignment(0, -0.15),
+        ..shader = RadialGradient(
+          center: const Alignment(0, -0.15),
           radius: 1.25,
-          colors: [Color(0x00000000), Color(0xD9101F18)],
-          stops: [0.45, 1.0],
+          colors: [const Color(0x00000000), vig.withValues(alpha: 0.85)],
+          stops: const [0.45, 1.0],
         ).createShader(rect),
     );
   }
 
   @override
-  bool shouldRepaint(covariant FeltPainter old) => old.seed != seed;
+  bool shouldRepaint(covariant FeltPainter old) =>
+      old.seed != seed || old.theme?.id != theme?.id;
 }
 
 class FeltTable extends StatelessWidget {
   final Widget child;
   final BorderRadiusGeometry borderRadius;
+  final ClubThemeDef? theme;
   const FeltTable(
-      {super.key, required this.child, this.borderRadius = BorderRadius.zero});
+      {super.key,
+      required this.child,
+      this.borderRadius = BorderRadius.zero,
+      this.theme});
 
   @override
   Widget build(BuildContext context) {
     return ClipRRect(
       borderRadius: borderRadius,
-      child: CustomPaint(painter: const FeltPainter(), child: child),
+      child: CustomPaint(painter: FeltPainter(theme: theme), child: child),
     );
   }
 }
@@ -104,6 +113,7 @@ class DominoTilePainter extends CustomPainter {
   final bool vertical;
   final bool faceDown;
   final double elevation;
+  final TileStyleDef? style;
 
   const DominoTilePainter({
     required this.first,
@@ -111,7 +121,14 @@ class DominoTilePainter extends CustomPainter {
     this.vertical = true,
     this.faceDown = false,
     this.elevation = 1.0,
+    this.style,
   });
+
+  Color get _face => style?.face ?? ClubPalette.ivory;
+  Color get _faceShadow => style?.faceShadow ?? ClubPalette.ivoryShadow;
+  Color get _pip => style?.pip ?? ClubPalette.carbon;
+  Color get _rivet => style?.rivet ?? ClubPalette.brass;
+  Color get _divider => style?.divider ?? const Color(0xFFB8A87F);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -142,15 +159,16 @@ class DominoTilePainter extends CustomPainter {
       return;
     }
 
-    // aged bone body: radial ivory fade, lit from top-center
+    // bone body: radial face fade, lit from top-center
+    final faceMid = Color.lerp(_face, _faceShadow, 0.45) ?? _face;
     canvas.drawRRect(
       body,
       Paint()
-        ..shader = const RadialGradient(
-          center: Alignment(0, -0.45),
+        ..shader = RadialGradient(
+          center: const Alignment(0, -0.45),
           radius: 1.15,
-          colors: [Color(0xFFF0EAD6), Color(0xFFE7DCC2), Color(0xFFE2D7BD)],
-          stops: [0.0, 0.55, 1.0],
+          colors: [_face, faceMid, _faceShadow],
+          stops: const [0.0, 0.55, 1.0],
         ).createShader(Offset.zero & size),
     );
     // 1px ivory top highlight (micro-bevel catching the lamp)
@@ -191,10 +209,10 @@ class DominoTilePainter extends CustomPainter {
     for (final s in spots) {
       final cx = half.left + (s % 3 + 0.5) * cellW;
       final cy = half.top + (s ~/ 3 + 0.5) * cellH;
-      // carved recess: soft dark pocket, carbon pip, faint top-left catchlight
+      // carved recess: soft dark pocket, pip, faint top-left catchlight
       canvas.drawCircle(Offset(cx, cy + r * 0.35), r,
           Paint()..color = Colors.black.withValues(alpha: 0.30));
-      canvas.drawCircle(Offset(cx, cy), r, Paint()..color = ClubPalette.carbon);
+      canvas.drawCircle(Offset(cx, cy), r, Paint()..color = _pip);
       canvas.drawCircle(Offset(cx - r * 0.25, cy - r * 0.3), r * 0.32,
           Paint()..color = const Color(0x29F0EAD6));
     }
@@ -206,31 +224,35 @@ class DominoTilePainter extends CustomPainter {
         horizontal ? center + Offset(-half, 0) : center + Offset(0, -half);
     final p2 =
         horizontal ? center + Offset(half, 0) : center + Offset(0, half);
+    final divDark =
+        Color.lerp(_divider, Colors.black, 0.25) ?? _divider;
     // recessed channel
     canvas.drawLine(
         p1 + const Offset(0, 1.2),
         p2 + const Offset(0, 1.2),
         Paint()
-          ..color = const Color(0xFF8F7F5C)
+          ..color = divDark
           ..strokeWidth = 3.2);
     canvas.drawLine(
         p1,
         p2,
         Paint()
-          ..color = const Color(0xFFC4B48C)
+          ..color = _divider
           ..strokeWidth = 2.2);
-    // centered brass rivet
+    // centered rivet
     final rr = len * 0.075;
+    final rivetLight = Color.lerp(_rivet, Colors.white, 0.35) ?? _rivet;
+    final rivetDark = Color.lerp(_rivet, Colors.black, 0.4) ?? _rivet;
     canvas.drawCircle(center + const Offset(0, 1), rr,
         Paint()..color = Colors.black.withValues(alpha: 0.35));
     canvas.drawCircle(
       center,
       rr,
       Paint()
-        ..shader = const RadialGradient(
-          center: Alignment(-0.35, -0.4),
+        ..shader = RadialGradient(
+          center: const Alignment(-0.35, -0.4),
           radius: 1.0,
-          colors: [Color(0xFFE9C176), Color(0xFFC5A059), Color(0xFF8C6C30)],
+          colors: [rivetLight, _rivet, rivetDark],
         ).createShader(Rect.fromCircle(center: center, radius: rr)),
     );
     canvas.drawCircle(
@@ -239,7 +261,7 @@ class DominoTilePainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1
-          ..color = ClubPalette.brassDark);
+          ..color = rivetDark);
   }
 
   void _paintBack(Canvas canvas, Size size, RRect body, double radius) {
@@ -288,7 +310,8 @@ class DominoTilePainter extends CustomPainter {
       old.first != first ||
       old.second != second ||
       old.vertical != vertical ||
-      old.faceDown != faceDown;
+      old.faceDown != faceDown ||
+      old.style?.id != style?.id;
 }
 
 /// A physical domino tile widget.
@@ -299,6 +322,7 @@ class DominoTile extends StatelessWidget {
   final bool faceDown;
   final double width;
   final double elevation;
+  final TileStyleDef? style;
 
   const DominoTile({
     super.key,
@@ -308,6 +332,7 @@ class DominoTile extends StatelessWidget {
     this.faceDown = false,
     required this.width,
     this.elevation = 1.0,
+    this.style,
   });
 
   double get height => vertical ? width * 2 : width / 2;
@@ -324,6 +349,7 @@ class DominoTile extends StatelessWidget {
           vertical: vertical,
           faceDown: faceDown,
           elevation: elevation,
+          style: style,
         ),
       ),
     );
@@ -622,16 +648,22 @@ class BrassSlider extends StatelessWidget {
 // ---------------------------------------------------------------------------
 class WalnutBezel extends StatelessWidget {
   final Widget child;
-  const WalnutBezel({super.key, required this.child});
+  final ClubThemeDef? theme;
+  const WalnutBezel({super.key, required this.child, this.theme});
 
   @override
   Widget build(BuildContext context) {
+    final t = theme;
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF4A3020), Color(0xFF2C1D11), Color(0xFF1A120B)],
+          colors: [
+            t?.walnutLight ?? const Color(0xFF4A3020),
+            t?.walnut ?? const Color(0xFF2C1D11),
+            t?.walnutDeep ?? const Color(0xFF1A120B),
+          ],
         ),
       ),
       child: Container(

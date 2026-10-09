@@ -32,6 +32,8 @@ dependencies:
     sdk: flutter
   audioplayers: ^6.8.1
   shared_preferences: ^2.5.6
+  in_app_purchase: ^3.2.0
+  meta: ^1.18.0
 
 dev_dependencies:
   flutter_test:
@@ -58,6 +60,8 @@ flutter:
   assets:
     - assets/audio/
     - assets/fonts/
+    - assets/domino_logo.png
+    - assets/wajiha_logo.png
 
   # Club de Dominó Habana type system (Stitch design system tokens).
   fonts:
