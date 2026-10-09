@@ -1,29 +1,41 @@
 import 'package:flutter/material.dart';
-import 'package:wajiha_game_core/wajiha_game_core.dart';
-import 'game_screen.dart';
+import 'package:flutter/services.dart';
+import 'services/audio_service.dart';
+import 'services/settings_store.dart';
+import 'theme/palette.dart';
+import 'theme/physical.dart';
+import 'screens/menu_screen.dart';
 
-void main() => runApp(const DominoesApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  await AudioService.instance.init();
+  final settings = SettingsStore();
+  await settings.load();
+  runApp(DominoesApp(settings: settings));
+}
 
 class DominoesApp extends StatelessWidget {
-  const DominoesApp({super.key});
+  final SettingsStore settings;
+  const DominoesApp({super.key, required this.settings});
 
   @override
   Widget build(BuildContext context) {
-    return GameShell(
-      variant: ShellVariant.neonArcade,
+    return MaterialApp(
       title: 'Dominoes',
-      tagline: 'Match the ends, empty your hand, race to 100! 🀄',
-      emoji: '🀄',
-      slug: 'dominoes',
-      howToPlay: '• Each player draws 7 tiles — highest double starts\n'
-          '• Tap a tile to play it on a matching open end\n'
-          '• Stuck? Draw from the boneyard until you can play\n'
-          '• Empty your hand to shout DOMINO! 🎉\n'
-          '• If everyone is blocked, fewest pips wins the round\n'
-          '• Round winner scores opponents\' leftover pips — first to 100 wins!',
-      playerOptions: const [1, 2, 3, 4],
-      supportsBots: true,
-      gameBuilder: (ctx, players, cb) => DominoesScreen(players: players, callbacks: cb),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        scaffoldBackgroundColor: ClubPalette.darkSurface,
+        colorScheme: const ColorScheme.dark(
+          primary: ClubPalette.brass,
+          surface: ClubPalette.darkSurface,
+        ),
+      ),
+      // The whole club is framed by a bevelled walnut bezel (DESIGN.md).
+      builder: (context, child) =>
+          WalnutBezel(child: child ?? const SizedBox.shrink()),
+      home: MenuScreen(settings: settings),
     );
   }
 }

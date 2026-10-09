@@ -30,12 +30,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  wajiha_game_core:
-    path: packages/wajiha_game_core
-
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
+  audioplayers: ^6.8.1
+  shared_preferences: ^2.5.6
 
 dev_dependencies:
   flutter_test:
@@ -58,6 +54,36 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/audio/
+    - assets/fonts/
+
+  # Club de Dominó Habana type system (Stitch design system tokens).
+  fonts:
+    - family: LibreCaslon
+      fonts:
+        - asset: assets/fonts/LibreCaslonText-Regular.ttf
+        - asset: assets/fonts/LibreCaslonText-Bold.ttf
+          weight: 700
+    - family: EBGaramond
+      fonts:
+        - asset: assets/fonts/EBGaramond-Regular.ttf
+        - asset: assets/fonts/EBGaramond-Italic.ttf
+          style: italic
+        - asset: assets/fonts/EBGaramond-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/EBGaramond-SemiBold.ttf
+          weight: 600
+    - family: SpaceGrotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-Regular.ttf
+        - asset: assets/fonts/SpaceGrotesk-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/SpaceGrotesk-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/SpaceGrotesk-Bold.ttf
+          weight: 700
 
   # To add assets to your application, add an assets section, like this:
   # assets:
