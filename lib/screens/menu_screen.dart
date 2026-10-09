@@ -123,7 +123,16 @@ class _MenuScreenState extends State<MenuScreen> {
   void _renameSeat(int seat) {
     final ctrl =
         TextEditingController(text: widget.settings.playerNames[seat]);
+    final focus = FocusNode();
     AudioService.instance.click();
+    // Commit on focus loss too (not just the Save button / keyboard-done):
+    // if the dialog is dismissed by tapping outside or the back button,
+    // the rename still sticks.
+    focus.addListener(() {
+      if (!focus.hasFocus) {
+        widget.settings.setPlayerName(seat, ctrl.text);
+      }
+    });
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
@@ -139,9 +148,13 @@ class _MenuScreenState extends State<MenuScreen> {
               const SizedBox(height: 12),
               TextField(
                 controller: ctrl,
+                focusNode: focus,
                 autofocus: true,
                 maxLength: 14,
                 style: ClubType.bodyText(17),
+                // Save on every keystroke: the name can never be "lost"
+                // by dismissing the dialog another way.
+                onChanged: (v) => widget.settings.setPlayerName(seat, v),
                 decoration: InputDecoration(
                   counterText: '',
                   filled: true,
@@ -183,7 +196,10 @@ class _MenuScreenState extends State<MenuScreen> {
           ),
         ),
       ),
-    );
+    ).then((_) {
+      focus.dispose();
+      ctrl.dispose();
+    });
   }
 
   void _howToPlay() {

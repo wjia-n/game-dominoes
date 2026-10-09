@@ -15,7 +15,12 @@ class SettingsStore extends ChangeNotifier {
   static const _kVolume = 'dominoes.volume';
   static const _kDifficulty = 'dominoes.difficulty';
   static const _kTarget = 'dominoes.target';
-  static const _kNames = 'dominoes.names';
+  static const _kNames = 'dominoes.names'; // legacy unordered StringSet key
+  /// Order-safe player-name storage: a single JSON string. Android's
+  /// SharedPreferences stores StringLists as an unordered StringSet, so the
+  /// old key scrambled name order on every app restart. Never use a
+  /// StringList for ordered data on Android.
+  static const _kNamesJson = 'dominoes_player_names_json';
   static const _kTheme = 'dominoes.theme';
   static const _kTileStyle = 'dominoes.tilestyle';
   static const _kAccent = 'dominoes.accent';
@@ -30,6 +35,26 @@ class SettingsStore extends ChangeNotifier {
   ];
 
   final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
+
+  /// Encode the 4 player names as one JSON string (order-preserving).
+  static String encodePlayerNames(List<String> names) => jsonEncode(names);
+
+  static String _cleanName(int i, Object? v) {
+    final s = v is String ? v.trim() : '';
+    return s.isEmpty ? defaultNames[i] : s;
+  }
+
+  /// Decode persisted names; falls back to defaults on missing/corrupt data.
+  static List<String> decodePlayerNames(String? raw) {
+    if (raw == null) return List.of(defaultNames);
+    try {
+      final d = jsonDecode(raw);
+      if (d is List && d.length == 4) {
+        return [for (int i = 0; i < 4; i++) _cleanName(i, d[i])];
+      }
+    } catch (_) {}
+    return List.of(defaultNames);
+  }
 
   bool musicOn = true;
   bool sfxOn = true;
@@ -58,8 +83,21 @@ class SettingsStore extends ChangeNotifier {
     difficulty =
         BotDifficulty.values[(await _prefs.getInt(_kDifficulty)) ?? 1];
     matchTarget = await _prefs.getInt(_kTarget) ?? 100;
-    final names = await _prefs.getStringList(_kNames);
-    if (names != null && names.length == 4) playerNames = names;
+    // Player names: prefer the order-safe JSON key. Fall back to the legacy
+    // StringList key once (one-time migration); it may already be scrambled
+    // on Android, which is exactly the bug this replaces.
+    final namesRaw = await _prefs.getString(_kNamesJson);
+    if (namesRaw != null) {
+      playerNames = decodePlayerNames(namesRaw);
+    } else {
+      final legacy = await _prefs.getStringList(_kNames);
+      playerNames = (legacy != null && legacy.length == 4)
+          ? [for (int i = 0; i < 4; i++) _cleanName(i, legacy[i])]
+          : List.of(defaultNames);
+      // Persist through the new key immediately and drop the legacy one.
+      await _prefs.setString(_kNamesJson, encodePlayerNames(playerNames));
+      await _prefs.remove(_kNames);
+    }
     themeId = await _prefs.getString(_kTheme) ?? 'habana';
     tileStyleId = await _prefs.getString(_kTileStyle) ?? 'hueso';
     tableAccentId = await _prefs.getString(_kAccent) ?? 'laton';
@@ -114,7 +152,8 @@ class SettingsStore extends ChangeNotifier {
   Future<void> setPlayerName(int slot, String name) async {
     final clean = name.trim().isEmpty ? defaultNames[slot] : name.trim();
     playerNames[slot] = clean;
-    await _prefs.setStringList(_kNames, playerNames);
+    await _prefs.setString(_kNamesJson, encodePlayerNames(playerNames));
+    await _prefs.remove(_kNames); // drop the legacy unordered key for good
     notifyListeners();
   }
 
