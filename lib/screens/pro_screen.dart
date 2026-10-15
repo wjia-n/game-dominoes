@@ -226,7 +226,6 @@ class _BuyCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final pro = store.proProduct;
     return ListenableBuilder(
       listenable: Listenable.merge(
           [store.purchaseInProgress, store.purchaseError]),
