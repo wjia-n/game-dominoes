@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// "Club de Dominó Habana" design tokens — the Stitch design system is the
-/// visual source of truth. Vintage Havana social club: ivory tiles with brass
+/// visual source of truth. Vintage social club: ivory tiles with brass
 /// spinners on green baize felt, dark walnut rails, warm tungsten lamplight.
 /// No neon, no glow, no cyberpunk — tactile pseudo-3D physical materials.
 abstract final class ClubPalette {

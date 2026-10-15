@@ -245,34 +245,8 @@ class _BuyCard extends StatelessWidget {
                 style:
                     ClubType.bodyText(14, color: ClubPalette.parchment),
                 textAlign: TextAlign.center,
-              )
-            else if (pro != null) ...[
-              Text('All 12 table themes · 10 tile styles · Hard bot · '
-                  'custom theme creator · exclusive finishes.',
-                  style: ClubType.bodyText(13.5,
-                      color: ClubPalette.parchment),
-                  textAlign: TextAlign.center),
-              const SizedBox(height: 12),
-              BrassButton(
-                label: 'Unlock PRO — ${pro.price}',
-                onTap: () {
-                  AudioService.instance.click();
-                  store.buyPro();
-                },
               ),
-              const SizedBox(height: 10),
-              GestureDetector(
-                onTap: () {
-                  AudioService.instance.click();
-                  store.restore();
-                },
-                child: Text('Restore purchase',
-                    style: ClubType.label(13,
-                            color: ClubPalette.brassBright)
-                        .copyWith(
-                            decoration: TextDecoration.underline)),
-              ),
-            ],
+
             if (store.purchaseInProgress.value)
               Padding(
                 padding: const EdgeInsets.only(top: 10),

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// "Club de Dominó Habana" theme catalog — every theme stays inside the
-/// vintage Havana club material world (real woods, brass/copper/silver,
+/// vintage social club material world (real woods, brass/copper/silver,
 /// bone tiles, billiard felts). Variety comes from different felts, woods,
 /// metal accents and tile materials — never neon, never generic.
 ///
@@ -163,7 +163,7 @@ class ClubThemes {
     ),
     ClubThemeDef(
       id: 'sierra',
-      name: 'Sierra Maestra',
+      name: 'Smoked Oak',
       mood: 'Forest felt, smoked oak, antique gold',
       felt: Color(0xFF243B1E),
       feltDeep: Color(0xFF1A2C15),
