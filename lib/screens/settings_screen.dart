@@ -4,6 +4,7 @@ import '../services/audio_service.dart';
 import '../services/settings_store.dart';
 import '../theme/palette.dart';
 import '../theme/physical.dart';
+import '../transfer/transfer_ui.dart';
 
 /// Ajustes — walnut panel, felt inlays, brass toggles & slider (DESIGN.md).
 class SettingsScreen extends StatefulWidget {
@@ -28,6 +29,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+              TransferSaveTile(gameSlug: 'dominoes'),
                 Row(
                   children: [
                     GestureDetector(
